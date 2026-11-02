@@ -52,8 +52,29 @@ export default async (req) => {
       if (text.length > MAX) return json({ error: "too large" }, 413);
       const body = JSON.parse(text);
       if (typeof body.value !== "string") return json({ error: "value must be a string" }, 400);
+      let outValue = body.value;
+      // SYSTEM LOCK GUARD (main state only): a phone holding old data can never lock/unlock the system by accident,
+      // and only someone who knows the Top Management code can switch a locked system back on.
+      if (key === "klb-ops-state-v2") {
+        try {
+          const prev = await s.get("kv:" + key, { type: "json" });
+          const pst = prev && prev.value ? JSON.parse(prev.value) : null;
+          const nst = JSON.parse(outValue);
+          const pl = (pst && pst.sysLock) || null, nl = nst.sysLock || null;
+          const prevOn = !!(pl && pl.on), nextOn = !!(nl && nl.on);
+          const prevRev = Number(pl && pl.rev) || 0, nextRev = Number(nl && nl.rev) || 0;
+          let keepPrev = false;
+          if (pl && nextRev < prevRev) keepPrev = true;            // older device: never overrides a newer lock decision
+          if (prevOn && !nextOn) {                                   // unlocking needs the Top Management code
+            const sent = String(req.headers.get("x-unlock-code") || "");
+            const need = String(process.env.OPS_CODE || "8910");
+            if (sent !== need) keepPrev = true;
+          }
+          if (keepPrev && pst) { nst.sysLock = pl; outValue = JSON.stringify(nst); }
+        } catch (e) { /* if anything is odd, save normally */ }
+      }
       const v = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      await s.setJSON("kv:" + key, { value: body.value, v });
+      await s.setJSON("kv:" + key, { value: outValue, v });
       return json({ ok: true, v });
     }
     if (req.method === "POST" && op === "scan") {
