@@ -7,7 +7,7 @@ function load(k){return caches.open(CACHE).then(function(c){return c.match("/__"
 self.addEventListener("message",function(e){if(e.data&&e.data.mode)e.waitUntil(store("mode",e.data.mode))});
 function events(o,M){var ev=[],m=function(x){return"R "+Number(x||0).toLocaleString("en-ZA")};
   (o.opsInbox||[]).forEach(function(x){ev.push(["i:"+x.id,"New "+(x.kind==="invoice"?"invoice ":"quote ")+x.docNumber,(x.client||"")+" - "+m(x.total)])});
-  if(M==="ceo"){(o.quotes||[]).filter(function(x){return x.status==="pending"}).forEach(function(x){ev.push(["q:"+x.id,"Approval needed",(x.note||"Quote / invoice")+" - "+m(x.amount)])});
+  if(M==="ceo"){(o.quotes||[]).filter(function(x){return x.status==="pending"}).forEach(function(x){ev.push(["q:"+x.id,"Approval needed",(x.note||"Quote / invoice")+" - "+m(x.amount)])});(o.docApprovals||[]).filter(function(x){return x.status==="pending"}).forEach(function(x){ev.push(["da:"+x.id,"Approve or decline "+(x.kind==="invoice"?"invoice ":"quotation ")+x.docNumber,(x.client||"")+" - "+m(x.total)+" (sent by "+(x.by||"reception")+")"])});
     (o.urgentParts||[]).filter(function(x){return x.status==="awaiting_ceo"}).forEach(function(x){ev.push(["p:"+x.id,"Urgent part - funds needed",(x.desc||x.part||x.title||"Urgent part")])})}
   else{(o.issues||[]).filter(function(x){return x.status!=="resolved"}).forEach(function(x){ev.push(["s:"+x.id,"New issue reported",x.text||x.title||x.note||"Issue"])});
     (o.jobReports||[]).forEach(function(r){if(r.injury)ev.push(["j:"+r.id,"INJURY reported",(r.worker||"")+" - "+(r.injuryNote||"")]);else if(r.brokenTool)ev.push(["j:"+r.id,"Broken tool",r.brokenTool])});
