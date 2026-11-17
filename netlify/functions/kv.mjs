@@ -1,5 +1,6 @@
 // /api/kv  -  shared storage for the three dashboards (state, scans, parts office)
 import { db, json, okKey } from "./_store.mjs";
+import { autoImportOnce } from "./_oldimport.mjs";
 export const config = { path: "/api/kv" };
 const MAX = 5 * 1024 * 1024;
 export default async (req) => {
@@ -44,6 +45,7 @@ export default async (req) => {
       return json({ scans, v: rec ? rec.v : null });
     }
     if (req.method === "GET") {
+      if (key === "klb-ops-state-v2") { try { await autoImportOnce(); } catch (e) { /* never block the page */ } }   // one-time import of the old site's data
       const rec = await s.get("kv:" + key, { type: "json" });
       return json({ value: rec ? rec.value : null, v: rec ? rec.v : null });
     }
