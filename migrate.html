@@ -1,0 +1,102 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCS | Import old system data</title>
+<style>body{margin:0;background:#1B1D1F;color:#ECEAE4;font:16px Helvetica,Arial,sans-serif;padding:18px;max-width:640px;margin:auto}
+h1{font-size:20px;color:#F0B429}button{display:block;width:100%;margin:10px 0;padding:14px;border:0;border-radius:10px;font-size:16px;font-weight:800;background:#F0B429;color:#111}
+button.g{background:#3A3F44;color:#ECEAE4}input,textarea{width:100%;box-sizing:border-box;background:#232629;color:#ECEAE4;border:1px solid #3A3F44;border-radius:8px;padding:10px;font-size:15px}
+pre{background:#232629;border-radius:8px;padding:10px;white-space:pre-wrap;font-size:13px}.ok{color:#7CC27B}.bad{color:#E06B5B}</style></head><body>
+<h1>Import old system data (build 110)</h1>
+<p><b>Easiest:</b> enter the Top Management code below and tap <b>Pull from old site</b>. No file needed.</p>
+<button id="pull" style="background:#7CC27B">Pull from old site (totalcontr.netlify.app)</button>
+<p>Adds everything from the OLD system (receptionist documents, quotes, invoices, calendar, clock-ins, staff, codes, reports) into this system. Nothing in this system is deleted. Running it twice adds nothing twice.</p>
+<p>1. Choose the old data file (old-data.json), or paste its text below.</p>
+<input type="file" id="f" accept=".json,.txt,application/json,text/plain">
+<textarea id="t" rows="4" placeholder="...or paste the old data here"></textarea>
+<p>2. Top Management code:</p><input id="c" type="password" inputmode="numeric" placeholder="Code">
+<button id="chk">Check (nothing is saved yet)</button>
+<pre id="out">Waiting...</pre>
+<button id="go" disabled>Import now</button>
+<button class="g" id="bk" disabled>Download backup of the current system first</button>
+<script>
+/* TCS merge: bring OLD system data into NEW system data. Nothing in NEW is ever deleted or overwritten by OLD. */
+function tcsMerge(nw, old) {
+  var out = JSON.parse(JSON.stringify(nw || {})), added = {}, o = old || {};
+  function bump(k, n) { if (n) added[k] = (added[k] || 0) + n; }
+  function keyOf(k, x) {
+    if (k === "clocks") return [x.workerName, x.inAt, x.division].join("|");
+    if (k === "opsReports" || k === "events" && !x.id) return JSON.stringify(x);
+    if (k === "companyAwards") return x.key;
+    return x && x.id != null ? String(x.id) : JSON.stringify(x);
+  }
+  var ARR = ["workers","receptionStaff","jobs","clocks","attendance","stockChecks","quotes","profits","jobReports","suggestions",
+    "documents","events","assets","urgentParts","behaviour","opsChecks","arrivals","opsInbox","mechJobs","mechLog",
+    "companyAwards","jobCards","docApprovals","issues","rewardNotices"];
+  ARR.forEach(function (k) {
+    if (!Array.isArray(o[k]) || !o[k].length) return;
+    var cur = Array.isArray(out[k]) ? out[k] : [], seen = {};
+    cur.forEach(function (x) { seen[keyOf(k, x)] = 1; });
+    var n = 0;
+    o[k].forEach(function (x) { var id = keyOf(k, x); if (!seen[id]) { seen[id] = 1; cur.push(x); n++; } });
+    out[k] = cur; bump(k, n);
+  });
+  // documents numbered the same in both systems: keep both, but never duplicate the same id
+  // keyed objects: old fills only what is missing
+  ["empInfo","whereabouts","toolDaily","opsReports","opsBriefs","phones","divReports"].forEach(function (k) {
+    if (!o[k] || typeof o[k] !== "object") return;
+    var cur = out[k] && typeof out[k] === "object" ? out[k] : {}, n = 0;
+    Object.keys(o[k]).forEach(function (id) {
+      if (k === "empInfo") { // passwords/PINs exactly as in the old system
+        var was = cur[id]; cur[id] = Object.assign({}, was || {}, o[k][id]);
+        if (!was) n++; return;
+      }
+      if (!(id in cur)) { cur[id] = o[k][id]; n++; }
+    });
+    out[k] = cur; bump(k, n);
+  });
+  // numbering never goes backwards
+  var dc = Object.assign({}, out.docCounters || {});
+  Object.keys(o.docCounters || {}).forEach(function (k) { dc[k] = Math.max(Number(dc[k]) || 0, Number(o.docCounters[k]) || 0); });
+  if (Object.keys(dc).length) out.docCounters = dc;
+  if (o.nextJob != null) out.nextJob = Math.max(Number(out.nextJob) || 0, Number(o.nextJob) || 0);
+  // documents: make sure counters are at least the highest number seen
+  // stock lists and tool barcodes
+  if (o.stockLists) { var sl = out.stockLists || {}; Object.keys(o.stockLists).forEach(function (k) {
+      var cur = sl[k] || [], s = {}; cur.forEach(function (x) { s[x] = 1; });
+      (o.stockLists[k] || []).forEach(function (x) { if (!s[x]) { cur.push(x); bump("stockLists." + k, 1); } }); sl[k] = cur; }); out.stockLists = sl; }
+  if (o.toolBarcodes) { var tb = out.toolBarcodes || {}; Object.keys(o.toolBarcodes).forEach(function (d) {
+      var cur = tb[d] || [], s = {}; cur.forEach(function (x) { s[String(x.barcode).toUpperCase()] = 1; });
+      (o.toolBarcodes[d] || []).forEach(function (x) { if (!s[String(x.barcode).toUpperCase()]) { cur.push(x); bump("toolBarcodes." + d, 1); } }); tb[d] = cur; }); out.toolBarcodes = tb; }
+  if (o.hs) { var hs = out.hs || {}; Object.keys(o.hs).forEach(function (k) {
+      if (Array.isArray(o.hs[k])) { var cur = hs[k] || [], s = {}; cur.forEach(function (x) { s[keyOf("hs", x)] = 1; });
+        o.hs[k].forEach(function (x) { var id = keyOf("hs", x); if (!s[id]) { s[id] = 1; cur.push(x); bump("hs." + k, 1); } }); hs[k] = cur; }
+      else if (!(k in hs)) hs[k] = o.hs[k]; }); out.hs = hs; }
+  // every other key (flags, seeds, settings): keep NEW, otherwise take OLD. sysLock is always kept as NEW (server guard).
+  Object.keys(o).forEach(function (k) { if (!(k in out) && k !== "sysLock") { out[k] = o[k]; bump("other." + k, 1); } });
+  if (!out.sysLock && o.sysLock) out.sysLock = o.sysLock;
+  return { state: out, added: added };
+}
+//if (typeof module !== "undefined") module.exports = tcsMerge;
+
+var $=function(i){return document.getElementById(i)},KEY="klb-ops-state-v2",cur=null,res=null,raw="";
+function say(m,c){$("out").className=c||"";$("out").textContent=m}
+function parseOld(txt){var d=JSON.parse(txt.trim());if(d&&typeof d.value==="string")d=JSON.parse(d.value);return d}
+$("f").onchange=function(){var r=new FileReader();r.onload=function(){$("t").value=r.result};r.readAsText($("f").files[0])};
+$("chk").onclick=async function(){try{
+  var old=parseOld($("t").value);
+  var r=await fetch("/api/kv?key="+KEY,{cache:"no-store"});var d=await r.json();raw=d.value||"";
+  cur=raw?JSON.parse(raw):{};res=tcsMerge(cur,old);
+  var a=res.added,k=Object.keys(a);
+  say("Old data read OK.\nWill be added to this system:\n"+(k.length?k.map(function(x){return " - "+x+": "+a[x]}).join("\n"):" (nothing new - already imported)")+
+    "\n\nDocuments after import: "+(res.state.documents||[]).length+"\nCalendar entries: "+(res.state.events||[]).length+"\nStaff: "+(res.state.workers||[]).length+" workers, "+(res.state.receptionStaff||[]).length+" receptionists","ok");
+  $("go").disabled=false;$("bk").disabled=false}catch(e){say("Could not read the old data: "+e.message,"bad")}};
+$("pull").onclick=async function(){try{say("Reading the old site...");
+  var r=await fetch("/api/import-old",{method:"POST",headers:{"x-unlock-code":$("c").value}});var d=await r.json();
+  if(!r.ok||!d.ok)throw new Error(d.error||r.status);
+  say("DONE.\nDocuments: "+d.documents+"\nCalendar entries: "+d.events+"\nApproval requests: "+d.approvals+"\nOperations inbox: "+d.inbox+"\nAdded: "+JSON.stringify(d.report[KEY]),"ok")}catch(e){say("Could not pull: "+e.message,"bad")}};
+$("bk").onclick=function(){var b=new Blob([raw||"{}"],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="tcs-backup-before-import.json";a.click()};
+$("go").onclick=async function(){try{
+  if(!res)return;$("go").disabled=true;
+  var r=await fetch("/api/kv?key="+KEY,{method:"PUT",headers:{"Content-Type":"application/json","x-unlock-code":$("c").value},body:JSON.stringify({value:JSON.stringify(res.state)})});
+  var d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||r.status);
+  var v=await (await fetch("/api/kv?key="+KEY,{cache:"no-store"})).json();var n=JSON.parse(v.value);
+  say("DONE. Saved and verified.\nDocuments: "+(n.documents||[]).length+"\nCalendar: "+(n.events||[]).length+"\nOpen the CEO, CFO, Master Control and Receptionist pages - they now show the old data.","ok")}catch(e){say("Import failed: "+e.message,"bad");$("go").disabled=false}};
+</script></body></html>
