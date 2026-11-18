@@ -18,7 +18,7 @@ function check(){return load("mode").then(function(M){if(!M)return;
     var ev=events(o,M),ids=ev.map(function(e){return e[0]});
     return load("seen-"+M).then(function(seen){if(!seen)return store("seen-"+M,ids);
       var fresh=ev.filter(function(e){return seen.indexOf(e[0])<0});
-      return Promise.all(fresh.slice(0,3).map(function(e){return self.registration.showNotification(e[1],{body:e[2],tag:e[0],icon:"icon-192.png",badge:"icon-192.png",vibrate:[200,100,200]})})).then(function(){return store("seen-"+M,seen.concat(fresh.map(function(e){return e[0]})).slice(-500))})})})})}
+      return Promise.all(fresh.slice(0,3).map(function(e){return self.registration.showNotification(e[1],{body:e[2],tag:e[0],icon:"icon-192.png",badge:"icon-192.png",vibrate:[200,100,200],requireInteraction:true,renotify:true})})).then(function(){return store("seen-"+M,seen.concat(fresh.map(function(e){return e[0]})).slice(-500))})})})})}
 self.addEventListener("periodicsync",function(e){if(e.tag==="tcs-check")e.waitUntil(check())});
 self.addEventListener("push",function(e){var d={};try{d=e.data.json()}catch(x){}e.waitUntil(self.registration.showNotification(d.title||"TCS",{body:d.body||"New item",icon:"icon-192.png"}))});
 self.addEventListener("notificationclick",function(e){e.notification.close();e.waitUntil(self.clients.matchAll({type:"window",includeUncontrolled:true}).then(function(l){if(l.length)return l[0].focus();return self.clients.openWindow((e.notification.data&&e.notification.data.url)||"./")}))});
