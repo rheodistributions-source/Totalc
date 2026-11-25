@@ -1,9 +1,27 @@
 // /api/kv  -  shared storage for the three dashboards (state, scans, parts office)
 import { db, json, okKey } from "./_store.mjs";
 import { autoImportOnce } from "./_oldimport.mjs";
+import { notifyChange } from "./_alerts.mjs";
+import { merge3 } from "./_merge3.mjs";
 export const config = { path: "/api/kv" };
-const MAX = 5 * 1024 * 1024;
-export default async (req) => {
+const MAX = 5 * 1024 * 1024, MAIN = "klb-ops-state-v2";
+const OPS = () => String(process.env.OPS_CODE || "8910");
+const newV = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Johannesburg" });
+// One backup per day: the system exactly as it was before the first save of that day. Kept for 30 days.
+async function dailyBackup(s, cur) {
+  if (!cur || !cur.value) return;
+  const k = "bak:" + today();
+  if (await s.getMetadata(k)) return;
+  await s.set(k, cur.value);
+  await trim(s, "bak:", 30);
+}
+async function trim(s, prefix, keep) {
+  const { blobs } = await s.list({ prefix });
+  const keys = blobs.map((b) => b.key).filter((k) => !k.includes("before-restore")).sort();
+  for (const k of keys.slice(0, Math.max(0, keys.length - keep))) await s.delete(k);
+}
+export default async (req, context) => {
   const u = new URL(req.url), key = u.searchParams.get("key"), op = u.searchParams.get("op");
   if (!okKey(key)) return json({ error: "bad key" }, 400);
   const s = db();
@@ -39,6 +57,23 @@ export default async (req) => {
       await s.setJSON("outlog:" + key, log.slice(-500));
       return json({ ok: true, code: found.barcode, name: found.name, group: found.group || "", div, t: now, prevT: prev && prev.on ? prev.t : null });
     }
+    // Backups: list them, or put one back (Top Management code needed)
+    if (req.method === "GET" && op === "backups") {
+      const { blobs } = await s.list({ prefix: "bak:" });
+      return json({ backups: blobs.map((b) => b.key.slice(4)).sort().reverse() });
+    }
+    if (req.method === "POST" && op === "restore") {
+      if (String(req.headers.get("x-unlock-code") || "") !== OPS()) return json({ error: "Wrong Top Management code" }, 403);
+      const day = String(u.searchParams.get("day") || "");
+      const bak = /^[0-9A-Za-z:_-]{6,40}$/.test(day) ? await s.get("bak:" + day) : null;
+      if (!bak) return json({ error: "No backup for " + day }, 404);
+      const cur = await s.get("kv:" + MAIN, { type: "json" });
+      if (cur && cur.value) await s.set("bak:" + today() + "-before-restore-" + Date.now().toString(36), cur.value);
+      const v = newV();
+      await s.set("ver:" + v, bak);
+      await s.setJSON("kv:" + MAIN, { value: bak, v });
+      return json({ ok: true, v, restored: day });
+    }
     if (req.method === "GET" && op === "sync") {
       const rec = await s.get("kv:" + key, { type: "json" });
       const scans = (await s.get("scans:" + key, { type: "json" })) || {};
@@ -54,30 +89,50 @@ export default async (req) => {
       if (text.length > MAX) return json({ error: "too large" }, 413);
       const body = JSON.parse(text);
       if (typeof body.value !== "string") return json({ error: "value must be a string" }, 400);
-      let outValue = body.value;
-      // SYSTEM LOCK GUARD (main state only): a phone holding old data can never lock/unlock the system by accident,
-      // and only someone who knows the Top Management code can switch a locked system back on.
-      if (key === "klb-ops-state-v2") {
-        try {
-          const prev = await s.get("kv:" + key, { type: "json" });
-          const pst = prev && prev.value ? JSON.parse(prev.value) : null;
-          const nst = JSON.parse(outValue);
-          const pl = (pst && pst.sysLock) || null, nl = nst.sysLock || null;
-          const prevOn = !!(pl && pl.on), nextOn = !!(nl && nl.on);
-          const prevRev = Number(pl && pl.rev) || 0, nextRev = Number(nl && nl.rev) || 0;
-          let keepPrev = false;
-          if (pl && nextRev < prevRev) keepPrev = true;            // older device: never overrides a newer lock decision
-          if (prevOn && !nextOn) {                                   // unlocking needs the Top Management code
-            const sent = String(req.headers.get("x-unlock-code") || "");
-            const need = String(process.env.OPS_CODE || "8910");
-            if (sent !== need) keepPrev = true;
-          }
-          if (keepPrev && pst) { nst.sysLock = pl; outValue = JSON.stringify(nst); }
-        } catch (e) { /* if anything is odd, save normally */ }
+      if (key !== MAIN) {
+        const v = newV();
+        await s.setJSON("kv:" + key, { value: body.value, v });
+        return json({ ok: true, v });
       }
-      const v = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      // ---- main system data ----
+      const cur = await s.get("kv:" + key, { type: "json" });
+      let pst = null; try { pst = cur && cur.value ? JSON.parse(cur.value) : null; } catch { pst = null; }
+      let nst = JSON.parse(body.value), merged = false;
+      // NO LOST WORK: if someone else saved since this device last loaded, keep both sides' changes.
+      const base = typeof body.base === "string" && body.base ? body.base : null;
+      if (pst && (!base || base !== cur.v)) {
+        let bst;
+        if (base) { try { const bv = await s.get("ver:" + base); if (bv) bst = JSON.parse(bv); } catch { bst = undefined; } }
+        nst = merge3(bst, nst, pst);
+        merged = true;
+      }
+      // SYSTEM LOCK GUARD: a phone holding old data can never lock/unlock the system by accident,
+      // and only someone who knows the Top Management code can switch a locked system back on.
+      try {
+        const pl = (pst && pst.sysLock) || null, nl = nst.sysLock || null;
+        const prevOn = !!(pl && pl.on), nextOn = !!(nl && nl.on);
+        const prevRev = Number(pl && pl.rev) || 0, nextRev = Number(nl && nl.rev) || 0;
+        let keepPrev = false;
+        if (pl && nextRev < prevRev) keepPrev = true;            // older device: never overrides a newer lock decision
+        if (prevOn && !nextOn) {                                   // unlocking needs the Top Management code
+          const sent = String(req.headers.get("x-unlock-code") || "");
+          if (sent !== OPS()) keepPrev = true;
+        }
+        if (keepPrev && pst) nst = { ...nst, sysLock: pl };
+      } catch (e) { /* if anything is odd, save normally */ }
+      let outValue = JSON.stringify(nst);
+      if (merged && outValue === body.value) merged = false;
+      const v = newV();
+      await s.set("ver:" + v, outValue);                           // this version, so the next save can be merged against it
       await s.setJSON("kv:" + key, { value: outValue, v });
-      return json({ ok: true, v });
+      // after the reply: phone alerts, daily backup, tidy old versions
+      const after = (async () => {
+        try { await notifyChange(pst, nst, s); } catch (e) { console.log("alerts failed", e && e.message); }
+        try { await dailyBackup(s, cur); } catch (e) { console.log("backup failed", e && e.message); }
+        try { if (Math.random() < 0.08) await trim(s, "ver:", 80); } catch (e) { /* next time */ }
+      })();
+      if (context && typeof context.waitUntil === "function") context.waitUntil(after); else await after;
+      return json({ ok: true, v, merged });
     }
     if (req.method === "POST" && op === "scan") {
       const code = u.searchParams.get("code");
